@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
-import type { ShowPlan, LayoutResult, LayoutRules, Suggestion } from '../engine/types'
+import { current } from 'immer'
+import type { ShowPlan, LayoutResult, LayoutRules, Suggestion, Point, Inches } from '../engine/types'
 
 // ---------------------------------------------------------------------------
 // Default plan — 400×300 ft hall, 500 10×10 inline booths (perf test target)
@@ -65,6 +66,12 @@ function getWorker(): Worker {
 // ---------------------------------------------------------------------------
 // Store types
 // ---------------------------------------------------------------------------
+export interface ContextMenuState {
+  boothId: string
+  screenX: number
+  screenY: number
+}
+
 interface PlanStore {
   plan: ShowPlan
   layoutResult: LayoutResult | null
@@ -72,6 +79,19 @@ interface PlanStore {
   selectedIds: string[]
   viewFitTrigger: number
   showOverlays: { numbers: boolean; dimensions: boolean; aisles: boolean }
+
+  // History
+  past: ShowPlan[]
+  future: ShowPlan[]
+
+  // Editing UI state
+  movedBoothIds: string[]
+  contextMenu: ContextMenuState | null
+
+  // Derived helpers
+  canUndo: boolean
+  canRedo: boolean
+  pinnedCount: number
 
   // Actions
   updateRules: (patch: Partial<LayoutRules>) => void
@@ -84,6 +104,25 @@ interface PlanStore {
   triggerFit: () => void
   toggleOverlay: (key: keyof PlanStore['showOverlays']) => void
   triggerGenerate: () => void
+
+  // History actions
+  undo: () => void
+  redo: () => void
+  _pushHistory: () => void
+
+  // Booth editing actions (each pushes to history)
+  moveBooth: (boothId: string, origin: Point) => void
+  resizeBooth: (boothId: string, width: Inches, depth?: Inches) => void
+  pinBooth: (boothId: string) => void
+  unpinBooth: (boothId: string) => void
+  deleteBooth: (boothId: string) => void
+  setBoothStatus: (boothId: string, status: 'available' | 'held' | 'sold') => void
+  setBoothType: (boothId: string, typeId: string) => void
+  resetAllOverrides: () => void
+
+  // Context menu
+  showContextMenu: (state: ContextMenuState) => void
+  hideContextMenu: () => void
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +136,13 @@ export const usePlanStore = create<PlanStore>()(
     selectedIds: [],
     viewFitTrigger: 0,
     showOverlays: { numbers: true, dimensions: false, aisles: true },
+    past: [],
+    future: [],
+    movedBoothIds: [],
+    contextMenu: null,
+    canUndo: false,
+    canRedo: false,
+    pinnedCount: 0,
 
     updateRules: (patch) => {
       set(state => { Object.assign(state.plan.rules, patch) })
@@ -112,7 +158,27 @@ export const usePlanStore = create<PlanStore>()(
     },
 
     setLayoutResult: (r) => {
-      set(state => { state.layoutResult = r; state.isGenerating = false })
+      set(state => {
+        // Track moved booths for highlight
+        const prev = state.layoutResult
+        if (prev && state.plan.overrides.length > 0) {
+          const prevByNum = new Map(prev.booths.map(b => [b.number, b.origin]))
+          state.movedBoothIds = r.booths
+            .filter(b => {
+              const po = prevByNum.get(b.number)
+              return po && (po.x !== b.origin.x || po.y !== b.origin.y)
+            })
+            .map(b => b.id)
+        } else {
+          state.movedBoothIds = []
+        }
+        state.layoutResult = r
+        state.isGenerating = false
+        state.pinnedCount = r.booths.filter(b => b.pinned).length
+      })
+      if (get().movedBoothIds.length > 0) {
+        setTimeout(() => usePlanStore.setState(s => ({ ...s, movedBoothIds: [] })), 600)
+      }
     },
 
     setGenerating: (v) => {
@@ -138,6 +204,7 @@ export const usePlanStore = create<PlanStore>()(
     },
 
     applySuggestion: (s) => {
+      get()._pushHistory()
       const newPlan = s.apply()
       set(state => { state.plan = newPlan as typeof state.plan })
       get().triggerGenerate()
@@ -164,6 +231,174 @@ export const usePlanStore = create<PlanStore>()(
         }
         w.postMessage(plan)
       }, 80)
+    },
+
+    // ---------------------------------------------------------------------------
+    // History
+    // ---------------------------------------------------------------------------
+
+    _pushHistory: () => {
+      set(state => {
+        state.past.push(JSON.parse(JSON.stringify(current(state.plan))) as ShowPlan)
+        state.future = []
+        if (state.past.length > 100) state.past.shift()
+        state.canUndo = true
+        state.canRedo = false
+      })
+    },
+
+    undo: () => {
+      if (!get().canUndo) return
+      set(state => {
+        const prev = state.past.pop()!
+        state.future.unshift(JSON.parse(JSON.stringify(current(state.plan))) as ShowPlan)
+        state.plan = prev
+        state.canUndo = state.past.length > 0
+        state.canRedo = true
+      })
+      get().triggerGenerate()
+    },
+
+    redo: () => {
+      if (!get().canRedo) return
+      set(state => {
+        const next = state.future.shift()!
+        state.past.push(JSON.parse(JSON.stringify(current(state.plan))) as ShowPlan)
+        state.plan = next
+        state.canUndo = true
+        state.canRedo = state.future.length > 0
+      })
+      get().triggerGenerate()
+    },
+
+    // ---------------------------------------------------------------------------
+    // Booth editing
+    // ---------------------------------------------------------------------------
+
+    moveBooth: (boothId, origin) => {
+      get()._pushHistory()
+      set(state => {
+        // Optimistic update
+        if (state.layoutResult) {
+          const b = state.layoutResult.booths.find(b => b.id === boothId)
+          if (b) { b.origin = origin; b.pinned = true }
+        }
+        // Upsert override
+        const idx = state.plan.overrides.findIndex(o => o.boothId === boothId)
+        const ov = { boothId, origin, pinned: true as const }
+        if (idx >= 0) Object.assign(state.plan.overrides[idx], ov)
+        else state.plan.overrides.push(ov)
+      })
+      get().triggerGenerate()
+    },
+
+    resizeBooth: (boothId, width, depth) => {
+      get()._pushHistory()
+      set(state => {
+        // Optimistic update
+        if (state.layoutResult) {
+          const b = state.layoutResult.booths.find(b => b.id === boothId)
+          if (b) { b.width = width; b.pinned = true; if (depth !== undefined) b.depth = depth }
+        }
+        const idx = state.plan.overrides.findIndex(o => o.boothId === boothId)
+        const ov = { boothId, width, depth, pinned: true as const }
+        if (idx >= 0) Object.assign(state.plan.overrides[idx], ov)
+        else state.plan.overrides.push(ov)
+      })
+      get().triggerGenerate()
+    },
+
+    pinBooth: (boothId) => {
+      get()._pushHistory()
+      set(state => {
+        if (state.layoutResult) {
+          const b = state.layoutResult.booths.find(b => b.id === boothId)
+          if (b) b.pinned = true
+        }
+        const idx = state.plan.overrides.findIndex(o => o.boothId === boothId)
+        if (idx >= 0) state.plan.overrides[idx].pinned = true
+        else state.plan.overrides.push({ boothId, pinned: true })
+      })
+      get().triggerGenerate()
+    },
+
+    unpinBooth: (boothId) => {
+      get()._pushHistory()
+      set(state => {
+        if (state.layoutResult) {
+          const b = state.layoutResult.booths.find(b => b.id === boothId)
+          if (b) b.pinned = false
+        }
+        // Remove the override entirely (unpinned = no override)
+        state.plan.overrides = state.plan.overrides.filter(o => o.boothId !== boothId)
+      })
+      get().triggerGenerate()
+    },
+
+    deleteBooth: (boothId) => {
+      get()._pushHistory()
+      set(state => {
+        // Optimistic update
+        if (state.layoutResult) {
+          state.layoutResult.booths = state.layoutResult.booths.filter(b => b.id !== boothId)
+        }
+        const idx = state.plan.overrides.findIndex(o => o.boothId === boothId)
+        const ov = { boothId, deleted: true, pinned: true as const }
+        if (idx >= 0) state.plan.overrides[idx] = ov
+        else state.plan.overrides.push(ov)
+      })
+      get().triggerGenerate()
+    },
+
+    setBoothStatus: (boothId, status) => {
+      get()._pushHistory()
+      set(state => {
+        if (state.layoutResult) {
+          const b = state.layoutResult.booths.find(b => b.id === boothId)
+          if (b) { b.status = status; b.pinned = true }
+        }
+        const idx = state.plan.overrides.findIndex(o => o.boothId === boothId)
+        const ov = { boothId, status, pinned: true as const }
+        if (idx >= 0) Object.assign(state.plan.overrides[idx], ov)
+        else state.plan.overrides.push(ov)
+      })
+      get().triggerGenerate()
+    },
+
+    setBoothType: (boothId, typeId) => {
+      get()._pushHistory()
+      set(state => {
+        if (state.layoutResult) {
+          const b = state.layoutResult.booths.find(b => b.id === boothId)
+          if (b) { b.typeId = typeId; b.pinned = true }
+        }
+        const idx = state.plan.overrides.findIndex(o => o.boothId === boothId)
+        const ov = { boothId, typeId, pinned: true as const }
+        if (idx >= 0) Object.assign(state.plan.overrides[idx], ov)
+        else state.plan.overrides.push(ov)
+      })
+      get().triggerGenerate()
+    },
+
+    resetAllOverrides: () => {
+      get()._pushHistory()
+      set(state => {
+        state.plan.overrides = []
+        state.pinnedCount = 0
+      })
+      get().triggerGenerate()
+    },
+
+    // ---------------------------------------------------------------------------
+    // Context menu
+    // ---------------------------------------------------------------------------
+
+    showContextMenu: (menuState) => {
+      set(state => { state.contextMenu = menuState })
+    },
+
+    hideContextMenu: () => {
+      set(state => { state.contextMenu = null })
     },
   })),
 )

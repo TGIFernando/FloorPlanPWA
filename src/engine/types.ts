@@ -139,6 +139,7 @@ export interface BoothOverride {
   origin?: Point
   rotation?: 0 | 90 | 180 | 270
   typeId?: string
+  status?: 'available' | 'held' | 'sold'
   deleted?: boolean
   pinned: true
 }

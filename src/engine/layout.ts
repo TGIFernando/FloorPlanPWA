@@ -3,8 +3,10 @@ import type {
   LayoutResult,
   LayoutRules,
   BoothType,
+  BoothOverride,
   PlacedBooth,
   Rect,
+  Band,
   Problem,
   LayoutMetrics,
   Inches,
@@ -239,25 +241,29 @@ export function generateLayout(plan: ShowPlan): LayoutResult {
     }
   }
 
-  // Apply numbering
-  numberBooths(allBooths, rules.boothNumbering)
+  // Apply overrides (pinned edits) and reflow affected rows
+  let finalBooths = applyOverridesAndReflow(plan.overrides, allBooths, bands, problems)
 
-  // Detect aisle faces for each booth
-  detectFaces(allBooths, allAisles)
+  // Apply numbering after overrides (positions may have changed)
+  numberBooths(finalBooths, rules.boothNumbering)
+
+  // Detect aisle faces after overrides
+  detectFaces(finalBooths, allAisles)
 
   // ---------------------------------------------------------------------------
   // Metrics
   // ---------------------------------------------------------------------------
   const buildableArea = bands.reduce((sum, b) => sum + b.width * b.height, 0)
   const aisleArea = allAisles.reduce((sum, a) => sum + a.width * a.height, 0)
-  const boothArea = allBooths.reduce((sum, b) => sum + b.width * b.depth, 0)
+  const boothArea = finalBooths.reduce((sum, b) => sum + b.width * b.depth, 0)
 
   const placedCount: Record<string, number> = {}
+  for (const t of boothTypes) placedCount[t.id] = 0
+  for (const b of finalBooths) placedCount[b.typeId] = (placedCount[b.typeId] ?? 0) + 1
+
   const unplacedCount: Record<string, number> = {}
   for (const t of boothTypes) {
-    const placed = t.quantity - (remaining.get(t.id) ?? 0)
-    placedCount[t.id] = placed
-    unplacedCount[t.id] = remaining.get(t.id) ?? 0
+    unplacedCount[t.id] = Math.max(0, t.quantity - (placedCount[t.id] ?? 0))
   }
 
   const estimatedRevenue = boothTypes.reduce((sum, t) => {
@@ -265,7 +271,7 @@ export function generateLayout(plan: ShowPlan): LayoutResult {
   }, 0)
 
   const metrics: LayoutMetrics = {
-    totalPlaced: allBooths.length,
+    totalPlaced: finalBooths.length,
     perTypePlaced: placedCount,
     perTypeRequested: Object.fromEntries(boothTypes.map(t => [t.id, t.quantity])),
     grossArea: buildableArea,
@@ -277,7 +283,7 @@ export function generateLayout(plan: ShowPlan): LayoutResult {
   }
 
   return {
-    booths: allBooths,
+    booths: finalBooths,
     aisles: allAisles,
     placedCount,
     unplacedCount,
@@ -532,6 +538,108 @@ function sortBoothTypes(types: BoothType[]): BoothType[] {
     if (a.priority !== b.priority) return a.priority - b.priority
     return b.depth - a.depth
   })
+}
+
+// ---------------------------------------------------------------------------
+// Override application and reflow
+// ---------------------------------------------------------------------------
+
+function applyOverridesAndReflow(
+  overrides: BoothOverride[],
+  booths: PlacedBooth[],
+  bands: Band[],
+  problems: Problem[],
+): PlacedBooth[] {
+  if (overrides.length === 0) return booths
+
+  const byId = new Map(booths.map(b => [b.id, b]))
+  const affectedRowYs = new Set<number>()
+
+  for (const ov of overrides) {
+    const b = byId.get(ov.boothId)
+    if (!b) continue  // orphaned override — booth not in this layout
+
+    b.pinned = true
+
+    if (ov.deleted) {
+      byId.delete(ov.boothId)
+      affectedRowYs.add(b.origin.y)
+      continue
+    }
+
+    if (ov.typeId !== undefined) b.typeId = ov.typeId
+    if (ov.status !== undefined) b.status = ov.status
+
+    if (ov.width !== undefined && ov.width !== b.width) {
+      b.width = ov.width
+      affectedRowYs.add(b.origin.y)
+    }
+    if (ov.depth !== undefined && ov.depth !== b.depth) {
+      b.depth = ov.depth
+      // depth change affects row height — beyond scope of row-level reflow
+    }
+    if (ov.origin !== undefined) {
+      const oldY = b.origin.y
+      b.origin = { ...ov.origin }
+      affectedRowYs.add(oldY)
+      affectedRowYs.add(ov.origin.y)
+    }
+    if (ov.rotation !== undefined) b.rotation = ov.rotation
+  }
+
+  let result = [...byId.values()]
+  for (const rowY of affectedRowYs) {
+    const band = bands.find(bd => rowY >= bd.y && rowY < bd.y + bd.height)
+    if (!band) continue
+    result = reflowRow(result, rowY, band.x, band.width, problems)
+  }
+
+  return result
+}
+
+function reflowRow(
+  booths: PlacedBooth[],
+  rowY: number,
+  bandX: number,
+  bandWidth: number,
+  problems: Problem[],
+): PlacedBooth[] {
+  const row = booths.filter(b => b.origin.y === rowY).sort((a, b) => a.origin.x - b.origin.x)
+  const other = booths.filter(b => b.origin.y !== rowY)
+
+  const result: PlacedBooth[] = []
+  let cursor = bandX
+
+  for (const b of row) {
+    if (b.pinned) {
+      if (b.origin.x < cursor) {
+        problems.push({
+          code: 'RUN_OVERFLOW',
+          severity: 'warning',
+          message: `Pinned booth overflows into adjacent space at x=${b.origin.x}.`,
+          affectedBoothIds: [b.id],
+        })
+      }
+      if (b.origin.x + b.width > bandX + bandWidth) {
+        problems.push({
+          code: 'RUN_OVERFLOW',
+          severity: 'warning',
+          message: `Pinned booth extends ${Math.round((b.origin.x + b.width - bandX - bandWidth) / 12)} ft past the band boundary.`,
+          affectedBoothIds: [b.id],
+        })
+      }
+      result.push(b)
+      cursor = Math.max(cursor, b.origin.x + b.width)
+    } else {
+      // Shift non-pinned booth to fill from cursor
+      if (cursor + b.width > bandX + bandWidth) continue  // drop, doesn't fit
+      b.origin = { x: cursor, y: rowY }
+      result.push(b)
+      cursor += b.width
+    }
+  }
+
+  return [...other, ...result]
 }
 
 function emptyResult(plan: ShowPlan, problems: Problem[]): LayoutResult {
