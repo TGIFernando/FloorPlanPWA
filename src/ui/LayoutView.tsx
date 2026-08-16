@@ -35,6 +35,7 @@ function ToolBtn({
 
 export default function LayoutView() {
   const plan          = usePlanStore(s => s.plan)
+  const setView       = usePlanStore(s => s.setView)
   const triggerFit    = usePlanStore(s => s.triggerFit)
   const undo          = usePlanStore(s => s.undo)
   const redo          = usePlanStore(s => s.redo)
@@ -69,6 +70,13 @@ export default function LayoutView() {
           <ToolBtn label="Undo" onClick={undo} disabled={!canUndo} />
           <ToolBtn label="Redo" onClick={redo} disabled={!canRedo} />
           <ToolBtn label="Fit" onClick={triggerFit} />
+          <button type="button"
+            onClick={() => setView('venue')}
+            className="rounded px-3 py-1 text-xs"
+            style={{ background: '#1e3a5f', color: '#60a5fa',
+              border: '1px solid #2a5078', cursor: 'pointer' }}>
+            Venue Editor →
+          </button>
         </div>
       </header>
 

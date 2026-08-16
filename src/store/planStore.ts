@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 import { current } from 'immer'
-import type { ShowPlan, LayoutResult, LayoutRules, Suggestion, Point, Inches } from '../engine/types'
+import type { ShowPlan, LayoutResult, LayoutRules, Suggestion, Point, Inches, Obstacle, Opening } from '../engine/types'
 
 // ---------------------------------------------------------------------------
 // Default plan — 400×300 ft hall, 500 10×10 inline booths (perf test target)
@@ -73,6 +73,19 @@ export interface ContextMenuState {
 }
 
 interface PlanStore {
+  // Navigation
+  view: 'layout' | 'venue'
+  setView: (v: 'layout' | 'venue') => void
+
+  // Venue CRUD (all push history + trigger generate)
+  setVenueOutline: (outline: Point[]) => void
+  setVenueSetback: (setback: Inches) => void
+  setVenueName: (name: string) => void
+  addObstacle: (obs: Obstacle) => void
+  removeObstacle: (id: string) => void
+  addOpening: (op: Opening) => void
+  removeOpening: (id: string) => void
+  setVenueScale: (pixelsPerInch: number | null) => void
   plan: ShowPlan
   layoutResult: LayoutResult | null
   isGenerating: boolean
@@ -130,6 +143,7 @@ interface PlanStore {
 // ---------------------------------------------------------------------------
 export const usePlanStore = create<PlanStore>()(
   immer((set, get) => ({
+    view: 'layout' as 'layout' | 'venue',
     plan: DEFAULT_PLAN,
     layoutResult: null,
     isGenerating: true,
@@ -143,6 +157,51 @@ export const usePlanStore = create<PlanStore>()(
     canUndo: false,
     canRedo: false,
     pinnedCount: 0,
+
+    setView: (v) => { set(state => { state.view = v }) },
+
+    setVenueOutline: (outline) => {
+      get()._pushHistory()
+      set(state => { state.plan.venue.outline = outline as typeof state.plan.venue.outline })
+      get().triggerGenerate()
+    },
+
+    setVenueSetback: (setback) => {
+      set(state => { state.plan.venue.perimeterSetback = setback })
+      get().triggerGenerate()
+    },
+
+    setVenueName: (name) => {
+      set(state => { state.plan.venue.name = name })
+    },
+
+    addObstacle: (obs) => {
+      get()._pushHistory()
+      set(state => { state.plan.venue.obstacles.push(obs as typeof state.plan.venue.obstacles[0]) })
+      get().triggerGenerate()
+    },
+
+    removeObstacle: (id) => {
+      get()._pushHistory()
+      set(state => { state.plan.venue.obstacles = state.plan.venue.obstacles.filter(o => o.id !== id) })
+      get().triggerGenerate()
+    },
+
+    addOpening: (op) => {
+      get()._pushHistory()
+      set(state => { state.plan.venue.openings.push(op as typeof state.plan.venue.openings[0]) })
+      get().triggerGenerate()
+    },
+
+    removeOpening: (id) => {
+      get()._pushHistory()
+      set(state => { state.plan.venue.openings = state.plan.venue.openings.filter(o => o.id !== id) })
+      get().triggerGenerate()
+    },
+
+    setVenueScale: (pixelsPerInch) => {
+      set(state => { state.plan.venue.scale = pixelsPerInch !== null ? { pixelsPerInch } : null })
+    },
 
     updateRules: (patch) => {
       set(state => { Object.assign(state.plan.rules, patch) })
