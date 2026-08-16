@@ -132,6 +132,7 @@ interface PlanStore {
   setBoothStatus: (boothId: string, status: 'available' | 'held' | 'sold') => void
   setBoothType: (boothId: string, typeId: string) => void
   resetAllOverrides: () => void
+  loadPlan: (plan: ShowPlan) => void
 
   // Context menu
   showContextMenu: (state: ContextMenuState) => void
@@ -445,6 +446,12 @@ export const usePlanStore = create<PlanStore>()(
         state.plan.overrides = []
         state.pinnedCount = 0
       })
+      get().triggerGenerate()
+    },
+
+    loadPlan: (plan) => {
+      get()._pushHistory()
+      set(state => { state.plan = plan as typeof state.plan })
       get().triggerGenerate()
     },
 

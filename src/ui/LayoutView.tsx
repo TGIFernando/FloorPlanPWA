@@ -1,4 +1,6 @@
+import { useRef } from 'react'
 import { usePlanStore } from '../store/planStore'
+import { savePlan, parsePlan } from '../store/planIO'
 import FloorCanvas from './canvas/FloorCanvas'
 import RulesPanel from './panels/RulesPanel'
 import DiagnosticsPanel from './panels/DiagnosticsPanel'
@@ -34,15 +36,35 @@ function ToolBtn({
 }
 
 export default function LayoutView() {
-  const plan          = usePlanStore(s => s.plan)
-  const setView       = usePlanStore(s => s.setView)
-  const triggerFit    = usePlanStore(s => s.triggerFit)
-  const undo          = usePlanStore(s => s.undo)
-  const redo          = usePlanStore(s => s.redo)
-  const canUndo       = usePlanStore(s => s.canUndo)
-  const canRedo       = usePlanStore(s => s.canRedo)
-  const pinnedCount   = usePlanStore(s => s.pinnedCount)
+  const plan           = usePlanStore(s => s.plan)
+  const setView        = usePlanStore(s => s.setView)
+  const triggerFit     = usePlanStore(s => s.triggerFit)
+  const undo           = usePlanStore(s => s.undo)
+  const redo           = usePlanStore(s => s.redo)
+  const canUndo        = usePlanStore(s => s.canUndo)
+  const canRedo        = usePlanStore(s => s.canRedo)
+  const pinnedCount    = usePlanStore(s => s.pinnedCount)
   const resetOverrides = usePlanStore(s => s.resetAllOverrides)
+  const loadPlan       = usePlanStore(s => s.loadPlan)
+  const fileInputRef   = useRef<HTMLInputElement>(null)
+
+  const handleLoadFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const raw = JSON.parse(reader.result as string)
+        const plan = parsePlan(raw)
+        if (!plan) { alert('Invalid floor plan file.'); return }
+        loadPlan(plan)
+      } catch {
+        alert('Could not read file.')
+      }
+    }
+    reader.readAsText(file)
+    e.target.value = ''
+  }
 
   return (
     <div className="flex flex-col" style={{ height: '100dvh', background: '#0d1820' }}>
@@ -70,6 +92,8 @@ export default function LayoutView() {
           <ToolBtn label="Undo" onClick={undo} disabled={!canUndo} />
           <ToolBtn label="Redo" onClick={redo} disabled={!canRedo} />
           <ToolBtn label="Fit" onClick={triggerFit} />
+          <ToolBtn label="Save" onClick={() => savePlan(plan)} />
+          <ToolBtn label="Load" onClick={() => fileInputRef.current?.click()} />
           <button type="button"
             onClick={() => setView('venue')}
             className="rounded px-3 py-1 text-xs"
@@ -78,6 +102,13 @@ export default function LayoutView() {
             Venue Editor →
           </button>
         </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,.floorplan.json"
+          style={{ display: 'none' }}
+          onChange={handleLoadFile}
+        />
       </header>
 
       {/* Body */}
